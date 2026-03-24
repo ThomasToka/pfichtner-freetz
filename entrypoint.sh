@@ -19,6 +19,61 @@ autoInstallPrerequisites() {
 	"$TOOL" check || "$TOOL" install -y
 }
 
+applyLegacyCompilerCompatibility() {
+	# Only patch checked-out Freetz-NG workspaces.
+	[ -f "make/host-tools/patchelf-host/patchelf-host.mk" ] || return
+	LEGACY_MARKER=".freetz-legacy-compat-applied"
+	[ -f "$LEGACY_MARKER" ] && return
+
+	# Older compilers (e.g. Ubuntu 16.04) do not support C++17.
+	tmp_cpp17="/tmp/cpp17-test-$$"
+	if echo 'int main(){return 0;}' | g++ -x c++ -std=c++17 - -o "$tmp_cpp17" >/dev/null 2>&1; then
+		rm -f "$tmp_cpp17"
+		return
+	fi
+	rm -f "$tmp_cpp17"
+
+	# Host-tools with -std=gnu17 must be lowered for old GCC.
+	find make/host-tools -maxdepth 2 -name '*.mk' -type f -exec sed -i 's/-std=gnu17/-std=gnu11/g' {} +
+
+	# Force patchelf host tools to legacy variant and always apply abandon patches.
+	PATCHELF_HOST_MK="make/host-tools/patchelf-host/patchelf-host.mk"
+	PATCHELF_TARGET_HOST_MK="make/host-tools/patchelf-target-host/patchelf-target-host.mk"
+	LZMA2_HOST_MK="make/host-tools/lzma2-host/lzma2-host.mk"
+	KCONFIG_HOST_MK="make/host-tools/kconfig-host/kconfig-host.mk"
+
+	[ -f "$PATCHELF_HOST_MK" ] && sed -i 's#$(call TOOLS_INIT, $(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),0.14.5,b49de1b33))#$(call TOOLS_INIT, 0.14.5)#' "$PATCHELF_HOST_MK"
+	[ -f "$PATCHELF_HOST_MK" ] && sed -i 's#$(PKG)_CONDITIONAL_PATCHES+=$(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),abandon,current)#$(PKG)_CONDITIONAL_PATCHES+=abandon#' "$PATCHELF_HOST_MK"
+	[ -f "$PATCHELF_TARGET_HOST_MK" ] && sed -i 's#$(call TOOLS_INIT, $(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),0.14.5,0.15.0))#$(call TOOLS_INIT, 0.14.5)#' "$PATCHELF_TARGET_HOST_MK"
+	[ -f "$PATCHELF_TARGET_HOST_MK" ] && sed -i 's#$(PKG)_CONDITIONAL_PATCHES+=$(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),abandon,current)#$(PKG)_CONDITIONAL_PATCHES+=abandon#' "$PATCHELF_TARGET_HOST_MK"
+
+	# Ubuntu 16.04 arm64 headers miss HWCAP_CRC32: disable that optimization.
+	if [ -f "$LZMA2_HOST_MK" ] && ! grep -q '^$(PKG)_CONFIGURE_OPTIONS += --disable-arm64-crc32$' "$LZMA2_HOST_MK"; then
+		sed -i '/^$(PKG)_CONFIGURE_OPTIONS += --disable-rpath/a $(PKG)_CONFIGURE_OPTIONS += --disable-arm64-crc32' "$LZMA2_HOST_MK"
+	fi
+
+	# kconfig v6.x needs C99 for declarations in for-loops on old GCC defaults.
+	if [ -f "$KCONFIG_HOST_MK" ] && ! grep -q 'HOST_EXTRACFLAGS="-Iscripts/include -std=gnu99"' "$KCONFIG_HOST_MK"; then
+		sed -i 's/HOST_EXTRACFLAGS="-Iscripts\/include"/HOST_EXTRACFLAGS="-Iscripts\/include -std=gnu99"/' "$KCONFIG_HOST_MK"
+	fi
+
+	# Keep required legacy options enabled when a config already exists.
+	if [ -f ".config" ]; then
+		grep -q '^FREETZ_ANCIENT_SYSTEM=' .config \
+			&& sed -i 's/^FREETZ_ANCIENT_SYSTEM=.*/FREETZ_ANCIENT_SYSTEM=y/' .config \
+			|| echo 'FREETZ_ANCIENT_SYSTEM=y' >> .config
+		grep -q '^FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=' .config \
+			&& sed -i 's/^FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=.*/FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=y/' .config \
+			|| echo 'FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=y' >> .config
+	fi
+
+	# Recover from interrupted uClibc locale builds on old systems.
+	find source -type f -path '*/uClibc-ng-*/extra/locale/c8tables.h' -size 0 -delete 2>/dev/null || true
+	find source -type f -path '*/uClibc-ng-*/extra/locale/gen_locale' -delete 2>/dev/null || true
+
+	touch "$LEGACY_MARKER"
+}
+
 
 
 # for backwards compatibility
@@ -57,12 +112,16 @@ fi
 # if there are missing prerequisites we try to install them via tools/prerequisites
 if [ "${AUTOINSTALL_PREREQUISITES}" != 'n' ]; then
 	export -f autoInstallPrerequisites
+	export -f applyLegacyCompilerCompatibility
 	if [ `id -u` -eq 0 ]; then
+		su "$BUILD_USER" -c applyLegacyCompilerCompatibility || true
 		su "$BUILD_USER" -c autoInstallPrerequisites || true
 	else
+		applyLegacyCompilerCompatibility || true
 		autoInstallPrerequisites || true
 	fi
 	unset autoInstallPrerequisites
+	unset applyLegacyCompilerCompatibility
 fi
 
 DEFAULT_SHELL=`getent passwd $BUILD_USER | cut -f 7 -d':'`

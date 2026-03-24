@@ -1,6 +1,6 @@
 set -eux
 
-dnf -y install gnupg
+apt-get -y install ca-certificates curl gnupg
 
 GOSU_VERSION=1.19
 ARCH="$(uname -m)"
@@ -18,10 +18,9 @@ curl -fsSL -o /usr/local/bin/gosu \
 curl -fsSL -o /usr/local/bin/gosu.asc \
 	"https://github.com/tianon/gosu/releases/download/${GOSU_VERSION}/gosu-${GOSU_ARCH}.asc"
 
-# Verify signature
+# Use hkp over port 80 for compatibility with legacy distro TLS stack.
 export GNUPGHOME="$(mktemp -d)"
-gpg --batch --keyserver hkps://keys.openpgp.org --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4
+gpg --batch --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4
 gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu
 
 chmod +x /usr/local/bin/gosu
-

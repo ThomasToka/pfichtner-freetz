@@ -116,7 +116,29 @@ If you encounter a problem when unpacking the image this could be caused by a pr
 - When installing docker initially on your machine, the user you want to use docker for has to be member of the docker group ("docker" on ubuntu, could differ in other distros), so add the user to the "docker" group
 - If you start an image (better said container) for the first time, the image is pulled from the remote docker repository ("dockerhub"). This could take a while but after that the image is cached on you machine and has not to be downloaded again
 - If you want to update an image that already was downloaded you can use `docker pull pfichtner/freetz` to check for a newer image and update it
-- When running on on a mac with arm cpu (M1/M2) pass ```--platform linux/amd64``` as additional argument to use x86 image
+- On mac with arm cpu (M1/M2), pulled images may be amd64-only. Use ```--platform linux/amd64``` as additional argument to run the x86 image.
+
+## Native Apple Silicon Build (local)
+If you build this repository locally on macOS Apple Silicon, arm64 is supported and usually faster than amd64 emulation.
+
+Build a local arm64 image:
+```
+docker build --platform linux/arm64 -t pfichtner/freetz:local .
+```
+
+Run it with host UID/GID mapping:
+```
+docker run --rm -it \
+  -e BUILD_USER_UID=$(id -u) \
+  -e BUILD_USER_GID=$(id -g) \
+  -v $PWD:/workspace \
+  pfichtner/freetz:local
+```
+
+Notes:
+- During image build on arm64, unsupported i386/multilib prerequisite packages are skipped automatically.
+- On Linux x86_64 this filtering is not applied.
+- On some legacy targets, a fresh checkout may stop the first `make` with `Please re-run.`; running `make` a second time is expected.
 
 ## Alternative to docker (podman)
 pfichtner/freetz also runs using podman (which has advantages due to being daemenless so you don't have to add users to any groups)

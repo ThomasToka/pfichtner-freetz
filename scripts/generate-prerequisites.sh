@@ -88,7 +88,7 @@ writePackageFile() {
 
 	[ -d `dirname "$TARGET_FILE"` ] || mkdir -p `dirname "$TARGET_FILE"`
 
-	PREFIX='sudo() { eval ${*@Q}; }'
+	PREFIX='sudo() { "$@"; }'
 	CONTENT=$(content "$SOURCE_FILE" "$DISTRO_ENTRY")
 	[ -z "$CONTENT" ] && fail "No content for $DISTRO_ENTRY"
 	echo -e "$PREFIX\n$CONTENT\n" >"$TARGET_FILE"
