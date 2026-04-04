@@ -7,6 +7,8 @@ DEFAULT_BUILD_USER='builduser'
 
 setToDefaults() {
 	BUILD_USER="$DEFAULT_BUILD_USER" && BUILD_USER_HOME='/workspace'
+	BUILD_USER_UID="${BUILD_USER_UID:-1000}"
+	BUILD_USER_GID="${BUILD_USER_GID:-1000}"
 }
 
 
@@ -20,58 +22,9 @@ autoInstallPrerequisites() {
 }
 
 applyLegacyCompilerCompatibility() {
-	# Only patch checked-out Freetz-NG workspaces.
-	[ -f "make/host-tools/patchelf-host/patchelf-host.mk" ] || return
-	LEGACY_MARKER=".freetz-legacy-compat-applied"
-	[ -f "$LEGACY_MARKER" ] && return
-
-	# Older compilers (e.g. Ubuntu 16.04) do not support C++17.
-	tmp_cpp17="/tmp/cpp17-test-$$"
-	if echo 'int main(){return 0;}' | g++ -x c++ -std=c++17 - -o "$tmp_cpp17" >/dev/null 2>&1; then
-		rm -f "$tmp_cpp17"
-		return
-	fi
-	rm -f "$tmp_cpp17"
-
-	# Host-tools with -std=gnu17 must be lowered for old GCC.
-	find make/host-tools -maxdepth 2 -name '*.mk' -type f -exec sed -i 's/-std=gnu17/-std=gnu11/g' {} +
-
-	# Force patchelf host tools to legacy variant and always apply abandon patches.
-	PATCHELF_HOST_MK="make/host-tools/patchelf-host/patchelf-host.mk"
-	PATCHELF_TARGET_HOST_MK="make/host-tools/patchelf-target-host/patchelf-target-host.mk"
-	LZMA2_HOST_MK="make/host-tools/lzma2-host/lzma2-host.mk"
-	KCONFIG_HOST_MK="make/host-tools/kconfig-host/kconfig-host.mk"
-
-	[ -f "$PATCHELF_HOST_MK" ] && sed -i 's#$(call TOOLS_INIT, $(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),0.14.5,b49de1b33))#$(call TOOLS_INIT, 0.14.5)#' "$PATCHELF_HOST_MK"
-	[ -f "$PATCHELF_HOST_MK" ] && sed -i 's#$(PKG)_CONDITIONAL_PATCHES+=$(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),abandon,current)#$(PKG)_CONDITIONAL_PATCHES+=abandon#' "$PATCHELF_HOST_MK"
-	[ -f "$PATCHELF_TARGET_HOST_MK" ] && sed -i 's#$(call TOOLS_INIT, $(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),0.14.5,0.15.0))#$(call TOOLS_INIT, 0.14.5)#' "$PATCHELF_TARGET_HOST_MK"
-	[ -f "$PATCHELF_TARGET_HOST_MK" ] && sed -i 's#$(PKG)_CONDITIONAL_PATCHES+=$(if $(FREETZ_TOOLS_PATCHELF_VERSION_ABANDON),abandon,current)#$(PKG)_CONDITIONAL_PATCHES+=abandon#' "$PATCHELF_TARGET_HOST_MK"
-
-	# Ubuntu 16.04 arm64 headers miss HWCAP_CRC32: disable that optimization.
-	if [ -f "$LZMA2_HOST_MK" ] && ! grep -q '^$(PKG)_CONFIGURE_OPTIONS += --disable-arm64-crc32$' "$LZMA2_HOST_MK"; then
-		sed -i '/^$(PKG)_CONFIGURE_OPTIONS += --disable-rpath/a $(PKG)_CONFIGURE_OPTIONS += --disable-arm64-crc32' "$LZMA2_HOST_MK"
-	fi
-
-	# kconfig v6.x needs C99 for declarations in for-loops on old GCC defaults.
-	if [ -f "$KCONFIG_HOST_MK" ] && ! grep -q 'HOST_EXTRACFLAGS="-Iscripts/include -std=gnu99"' "$KCONFIG_HOST_MK"; then
-		sed -i 's/HOST_EXTRACFLAGS="-Iscripts\/include"/HOST_EXTRACFLAGS="-Iscripts\/include -std=gnu99"/' "$KCONFIG_HOST_MK"
-	fi
-
-	# Keep required legacy options enabled when a config already exists.
-	if [ -f ".config" ]; then
-		grep -q '^FREETZ_ANCIENT_SYSTEM=' .config \
-			&& sed -i 's/^FREETZ_ANCIENT_SYSTEM=.*/FREETZ_ANCIENT_SYSTEM=y/' .config \
-			|| echo 'FREETZ_ANCIENT_SYSTEM=y' >> .config
-		grep -q '^FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=' .config \
-			&& sed -i 's/^FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=.*/FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=y/' .config \
-			|| echo 'FREETZ_TOOLS_PATCHELF_VERSION_ABANDON=y' >> .config
-	fi
-
-	# Recover from interrupted uClibc locale builds on old systems.
-	find source -type f -path '*/uClibc-ng-*/extra/locale/c8tables.h' -size 0 -delete 2>/dev/null || true
-	find source -type f -path '*/uClibc-ng-*/extra/locale/gen_locale' -delete 2>/dev/null || true
-
-	touch "$LEGACY_MARKER"
+	# Delegate compatibility tweaks to the provisioning-installed hook when present.
+	command -v freetz-apply-compat >/dev/null 2>&1 || return 0
+	freetz-apply-compat >/dev/null 2>&1 || true
 }
 
 
@@ -86,8 +39,10 @@ fi
 # ignore PARAMS BUILD_USER and BUILD_USER_HOME (use defaults) if not root
 [ `id -u` -eq 0 ] || setToDefaults
 
-[ -z "$BUILD_USER" ] && BUILD_USER="$DEFAULT_BUILD_USER"
-[ -n "$USE_UID_FROM" ] && BUILD_USER_UID=`stat -c "%u" $USE_UID_FROM`
+# Enforce deterministic container identity for builduser.
+BUILD_USER="$DEFAULT_BUILD_USER"
+BUILD_USER_UID=1000
+BUILD_USER_GID=1000
 
 if [ `id -u` -eq 0 ]; then
 	# better read HOME/DHOME from /etc/default/useradd /etc/adduser.conf
@@ -101,11 +56,20 @@ if [ `id -u` -eq 0 ]; then
 		TMP_DEL_USER=`getent passwd $BUILD_USER_UID | cut -d':' -f1` && [ -n "$TMP_DEL_USER" ] && [ "$DEFAULT_BUILD_USER" != "$TMP_DEL_USER" ] && userdel $TMP_DEL_USER >/dev/null 2>/dev/null
 	fi
 
-	[ -n "$BUILD_USER_GID" ] && USERADD="$USERADD -g $BUILD_USER_GID" && (getent group "$BUILD_USER_GID" || groupadd "$BUILD_USER_GID" "$BUILD_USER")
+	# remove the default builduser created in Dockerfile that exists in image
+	# before resolving target group/user so stale default groups do not interfere.
+	if getent passwd "$DEFAULT_BUILD_USER" >/dev/null; then
+		userdel "$DEFAULT_BUILD_USER"
+	fi
+
+	if [ -n "$BUILD_USER_GID" ]; then
+		USERADD="$USERADD -g $BUILD_USER_GID"
+		if ! getent group "$BUILD_USER_GID" >/dev/null; then
+			groupadd -g "$BUILD_USER_GID" "$BUILD_USER"
+		fi
+	fi
 
 	USERADD="$USERADD $BUILD_USER"
-	# remove the default builduser created in Dockerfile that exists in image
-	userdel "$DEFAULT_BUILD_USER"
 	eval "$USERADD"
 fi
 

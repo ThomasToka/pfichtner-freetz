@@ -52,6 +52,12 @@ Please note that the filesystem where Freetz(-NG) has been checked out has to be
 
 **In all three cases you'll get a shell (bash) where you can work like your are in "a normal bash" like before, e.g. you now call call `make` then `make menuconfig` or any other command you like.** If you want to leave this shell, just type `exit` as usual. 
 
+If you run commands in an already running container using `docker exec`, use `-u builduser` to avoid running as root by accident:
+```
+docker exec -u builduser <container-name> /bin/bash -lc "id"
+docker exec -u builduser <container-name> /bin/bash -lc "cd /workspace/freetz-ng && make"
+```
+
 
 ### Docker command/options explained
 ```docker run``` start a new container
@@ -126,19 +132,80 @@ Build a local arm64 image:
 docker build --platform linux/arm64 -t pfichtner/freetz:local .
 ```
 
-Run it with host UID/GID mapping:
+Create and enter a persistent container (first time):
 ```
-docker run --rm -it \
-  -e BUILD_USER_UID=$(id -u) \
-  -e BUILD_USER_GID=$(id -g) \
-  -v $PWD:/workspace \
-  pfichtner/freetz:local
+docker run -it \
+  -u builduser \
+  -v "$PWD":/workspace \
+  --name freetz-local \
+  pfichtner/freetz:local \
+  /bin/bash
+```
+
+Then inside the container beeing in /workspace:
+```
+git clone https://github.com/Freetz-NG/freetz-ng.git
+cd freetz-ng
+make menuconfig
+make
+```
+
+Later, if the container is stopped, start it:
+```
+docker start freetz-local
+```
+
+Enter the running container again as builduser:
+```
+docker exec -it -u builduser freetz-local /bin/bash
 ```
 
 Notes:
 - During image build on arm64, unsupported i386/multilib prerequisite packages are skipped automatically.
 - On Linux x86_64 this filtering is not applied.
 - On some legacy targets, a fresh checkout may stop the first `make` with `Please re-run.`; running `make` a second time is expected.
+
+## Ubuntu 14.04 Full Build (always fresh container and fresh clone)
+This workflow always uses the same image and container name: `ubuntu-14.04-freetz-ng`.
+Each rebuild removes the old container and creates a new one.
+No persistent workspace volume is used.
+
+Build (or rebuild) the image and remove the old container:
+```
+# from this repository root (pfichtner-freetz)
+docker build --build-arg PARENT=ubuntu:14.04 -t ubuntu-14.04-freetz-ng .
+docker rm -f ubuntu-14.04-freetz-ng 2>/dev/null || true
+```
+
+Create and start a new container:
+```
+docker run -d \
+  --name ubuntu-14.04-freetz-ng \
+  --platform linux/arm64 \
+  -u builduser \
+  -w /workspace \
+  ubuntu-14.04-freetz-ng \
+  /bin/bash -lc 'while true; do sleep 3600; done'
+```
+
+Enter the running container as builduser:
+```
+docker exec -it -u builduser ubuntu-14.04-freetz-ng /bin/bash
+```
+
+Clone fresh and build inside the new container:
+```
+cd /workspace
+git clone https://github.com/Freetz-NG/freetz-ng.git
+cd freetz-ng
+make oldconfig
+make
+```
+
+Notes:
+- After `git clone`, the Ubuntu 14.04 compatibility hook is applied automatically in interactive shells before the next command.
+- If you run clone/build in one non-interactive command (`bash -lc`), run `/usr/local/bin/freetz-apply-compat` once after clone.
+- If `make` stops once with `Please re-run.`, run `make` a second time in the same container.
 
 ## Alternative to docker (podman)
 pfichtner/freetz also runs using podman (which has advantages due to being daemenless so you don't have to add users to any groups)
